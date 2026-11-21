@@ -424,7 +424,8 @@ namespace VInc.AvatarHub.UI
             card.Add(Bullet("フォルダー構成の編集（追加・名前変更・並べ替え・入れ子・削除）"));
             card.Add(Bullet("プロファイルの中身の選択、起点の追加・削除、自動検出"));
             card.Add(Bullet("保存・削除・複製・JSON の読み込み・設定の変更"));
-            card.Add(Bullet("シーケンスインポートのキューの追加・並べ替え・削除（インポート中は除く）"));
+            card.Add(Bullet("④ インポートのキューの追加・並べ替え・削除（インポート中は除く）"));
+            card.Add(Bullet("⑦ アップロードのキューの追加・並べ替え・削除（アップロード中は除く）"));
             card.Add(Bullet("ブックマークの追加・削除・名前の変更・並べ替え・JSON の読み込み"));
             card.Add(Bullet("フォルダーの作成（取り消すと、作ったフォルダーを削除します。中にファイルを置いていた場合は残します）"));
             card.Add(UIKit.Text("元に戻せない操作", "viah-bold", "viah-mt12"));

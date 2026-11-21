@@ -9,7 +9,7 @@ using UnityEngine.UIElements;
 namespace VInc.AvatarHub.UI
 {
     /// <summary>
-    /// ④ シーケンスインポート：複数の unitypackage を上から順番にまとめてインポートする。
+    /// ④ インポート（内部の key は "import"・音は "seq-import"・セッションは "sequence" のまま）：複数の unitypackage を上から順番にまとめてインポートする。
     /// 黄色の「!」（同じ名前の別のファイル）があったら止めて確認するか、無視して入れるかを選べる。
     /// 行ごとに「プロファイルも作る」を選べ、作ったプロファイルは自動で保存して最後に一覧で確認する。
     /// </summary>
@@ -78,7 +78,7 @@ namespace VInc.AvatarHub.UI
             page.Add(scroll);
             var c = scroll.contentContainer;
 
-            c.Add(UIKit.Text("シーケンスインポート", "viah-page-title"));
+            c.Add(UIKit.Text("インポート", "viah-page-title"));
             c.Add(UIKit.Text("複数の unitypackage を、上から順番にまとめてインポートします。", "viah-page-sub"));
             c.Add(UIKit.Hint("import.intro", "使い方",
                 "unitypackage をドロップしてキューに並べ、「開始」を押します。黄色の「!」（同じ名前の別のファイルがある）が見つかったときは、止めて確認するか、無視して入れるかを選べます。「プロファイルも作る」をオンにした行は、インポートのあとに中身をそのままプロファイルとして登録します。"));

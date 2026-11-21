@@ -8,7 +8,7 @@ using UnityEngine.UIElements;
 
 namespace VInc.AvatarHub.UI
 {
-    /// <summary>unitypackage を扱う画面（UnityPackage から作る・シーケンスインポート）で共通の部品。</summary>
+    /// <summary>unitypackage を扱う画面（UnityPackage から作る・④ インポート）で共通の部品。</summary>
     public static class PackageUI
     {
         const string LastDirKey = "VInc.VIAH.packageDir";

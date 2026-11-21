@@ -2580,7 +2580,7 @@
     flex-shrink: 0;
     margin-bottom: 4px;
 }
-/* ───────────────────────── unitypackage（UnityPackage から作る・シーケンスインポート） ───────────────────────── */
+/* ───────────────────────── unitypackage（UnityPackage から作る・インポート） ───────────────────────── */
 
 .viah-pkg-summary {
     margin-top: 4px;
@@ -2723,6 +2723,40 @@
 .viah-root.compact .viah-queue-line > .viah-switch {
     margin-left: 30px;
     margin-top: 4px;
+}
+
+/* ───────────────────────── アバターアップローダー ───────────────────────── */
+
+.viah-queue-row.is-preparing,
+.viah-queue-row.is-building,
+.viah-queue-row.is-uploading {
+    border-color: var(--accent);
+    background-color: var(--accent-soft);
+}
+
+.viah-queue-row.is-agreeing,
+.viah-queue-row.is-interrupted {
+    border-color: var(--warn);
+}
+
+.viah-queue-line > Image {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
+.viah-progress.viah-progress-thin {
+    height: 4px;
+    margin-top: 4px;
+}
+
+.viah-upload-sdk {
+    flex-direction: row;
+    flex-wrap: wrap;
+}
+
+.viah-upload-sdk > .viah-kv {
+    margin-right: 24px;
 }
 
 /* ───────────────────────── 効果音（設定） ───────────────────────── */

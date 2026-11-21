@@ -147,6 +147,11 @@ namespace VInc.AvatarHub.Tests
             if (Directory.Exists(queueDir)) Directory.Delete(queueDir, true);
             PackageImportRunner.DirOverride = queueDir;
             PackageImportRunner.ResetCache();
+            // アップローダーは画面に出すだけ。ログイン中の名前が写らないよう、SDK の部分も見本に差し替える
+            AvatarUploader.DirOverride = queueDir;
+            AvatarUploader.ResetCache();
+            realUploadBackend = AvatarUploader.Backend;
+            AvatarUploader.Backend = new GuideUploadBackend();
 
             CreateSampleAssets();
             CreatePackageSamples();
@@ -259,7 +264,7 @@ namespace VInc.AvatarHub.Tests
         }
 
         /// <summary>
-        /// 「UnityPackage から作る」「シーケンスインポート」の画面用：GiftBox を unitypackage に書き出し、
+        /// 「UnityPackage から作る」「インポート」の画面用：GiftBox を unitypackage に書き出し、
         /// 確認画面に「移動」「まだ入っていない」が出るように一部を動かす・消す。
         /// </summary>
         static void CreatePackageSamples()
@@ -615,7 +620,7 @@ namespace VInc.AvatarHub.Tests
                     marks = new[] { (8, "#card-done", false) },
                 },
 
-                // シーケンスインポート
+                // インポート
                 new Shot
                 {
                     name = "import-seq-1",
@@ -625,7 +630,7 @@ namespace VInc.AvatarHub.Tests
                         PackageImportRunner.Save(PackageImportRunner.Sequence);
                         window.Navigate("import");
                     },
-                    marks = new[] { (1, "nav:シーケンスインポート", true), (2, "#card-add", false) },
+                    marks = new[] { (1, "nav:インポート", true), (2, "#card-add", false) },
                 },
                 new Shot
                 {
@@ -753,6 +758,59 @@ namespace VInc.AvatarHub.Tests
                     marks = new[] { (1, "#card-search-results", false) },
                 },
 
+                // アバターアップローダー
+                new Shot
+                {
+                    name = "upload-1",
+                    setup = () =>
+                    {
+                        SetUploadQueue("waiting");
+                        window.Navigate("uploader");
+                    },
+                    after = () => ScrollTo("#upload-drop"),
+                    marks = new[] { (1, "nav:アバターアップローダー", true), (2, "#upload-drop", false), (3, "#btn-upload-start", true) },
+                },
+                new Shot
+                {
+                    name = "upload-2",
+                    setup = () =>
+                    {
+                        SetUploadQueue("agreeing");
+                        window.Navigate("uploader");
+                    },
+                    after = () => ScrollTo("#card-upload-queue"),
+                    marks = new[] { (1, ".viah-queue-row.is-agreeing", false), (2, ".viah-footer-bar", false) },
+                },
+                new Shot
+                {
+                    name = "upload-3",
+                    plain = true,
+                    setup = () =>
+                    {
+                        SetUploadQueue("uploading");
+                        window.Navigate("uploader");
+                    },
+                    after = () => ScrollTo("#card-upload-queue"),
+                    marks = new[] { (1, ".viah-queue-row.is-uploading", false), (2, "#btn-upload-stop", true) },
+                },
+                new Shot
+                {
+                    name = "upload-4",
+                    setup = () =>
+                    {
+                        SetUploadQueue("done");
+                        window.Navigate("uploader");
+                    },
+                    after = () => ScrollTo("#card-upload-result"),
+                    marks = new[] { (1, "#card-upload-result", false) },
+                    cleanup = () =>
+                    {
+                        AvatarUploader.Session.running = false;
+                        AvatarUploader.Session.jobs.Clear();
+                        AvatarUploader.Save();
+                    },
+                },
+
                 // そのほか
                 new Shot
                 {
@@ -770,6 +828,84 @@ namespace VInc.AvatarHub.Tests
                 },
             };
             return list;
+        }
+
+        // ───────────── アバターアップローダー（見本） ─────────────
+
+        static IAvatarUploadBackend realUploadBackend;
+
+        /// <summary>ガイド画像用の SDK 部分（何もアップロードしない）。</summary>
+        class GuideUploadBackend : IAvatarUploadBackend
+        {
+            public string SdkVersion => "3.10.6";
+            public List<GameObject> FindAvatars(GameObject root) => new List<GameObject>();
+            public string BlueprintId(GameObject avatar) => "";
+            public bool PanelOpen => true;
+            public void OpenPanel() { }
+            public bool LoggedIn => true;
+            public string UserName => "VRChat のユーザー名";
+            public string Platform => "Windows（PC）";
+            public System.Threading.Tasks.Task<string> Prepare(string id, System.Threading.CancellationToken ct) => System.Threading.Tasks.Task.FromResult("");
+            public System.Threading.Tasks.Task Agree(string id, System.Threading.CancellationToken ct) => System.Threading.Tasks.Task.CompletedTask;
+            public System.Threading.Tasks.Task Upload(GameObject avatar, Action<string, float, bool> report, System.Threading.CancellationToken ct) => System.Threading.Tasks.Task.CompletedTask;
+            public void CancelUpload() { }
+        }
+
+        /// <summary>キューの見本。state：waiting / agreeing / uploading / done</summary>
+        static void SetUploadQueue(string state)
+        {
+            var s = AvatarUploader.Session;
+            s.jobs.Clear();
+            s.notice = "";
+            s.stopOnError = false;
+            s.stopAfterCurrent = false;
+            string[] names = { "Rusk_Casual", "Rusk_Dress", "Rusk_Swim", "Rusk_Quest" };
+            for (int i = 0; i < names.Length; i++)
+            {
+                s.jobs.Add(new UploadJob
+                {
+                    id = "guide" + i,
+                    name = names[i],
+                    scenePath = i < 3 ? "Assets/Scenes/Avatars.unity" : "Assets/Scenes/QuestAvatars.unity",
+                    objectPath = names[i],
+                    blueprintId = $"avtr_5f3c2a1e-7b4d-4c8a-9e21-0000000000{i + 1:00}",
+                });
+            }
+            var j = s.jobs;
+            s.running = state == "agreeing" || state == "uploading";
+            switch (state)
+            {
+                case "agreeing":
+                    j[0].status = "ready";
+                    j[1].status = "agreeing";
+                    j[1].phase = "著作権の同意を待っています（SDK の画面）";
+                    break;
+                case "uploading":
+                    j[0].status = "done";
+                    j[0].seconds = 96;
+                    j[0].finishedAt = "21:04";
+                    j[1].status = "uploading";
+                    j[1].phase = "アップロード中";
+                    j[1].progress = 0.42f;
+                    j[2].status = "ready";
+                    j[3].status = "ready";
+                    break;
+                case "done":
+                    j[0].status = "done";
+                    j[0].seconds = 96;
+                    j[0].finishedAt = "21:04";
+                    j[1].status = "done";
+                    j[1].seconds = 131;
+                    j[1].finishedAt = "21:06";
+                    j[2].status = "failed";
+                    j[2].message = "SDK のチェックでエラーがあります：PhysBone の数が上限を超えています（SDK の画面で内容を確認してください）";
+                    j[3].status = "done";
+                    j[3].seconds = 20;
+                    j[3].finishedAt = "21:07";
+                    j[3].message = "前回と中身が同じなので、アップロードは省かれました";
+                    break;
+            }
+            AvatarUploader.Save();
         }
 
         // ───────────── 進行 ─────────────
@@ -895,6 +1031,10 @@ namespace VInc.AvatarHub.Tests
                 ViahDatabase.Reload();
                 PackageImportRunner.DirOverride = null;
                 PackageImportRunner.ResetCache();
+                AvatarUploader.Session.running = false;
+                AvatarUploader.DirOverride = null;
+                AvatarUploader.ResetCache();
+                AvatarUploader.Backend = realUploadBackend;
                 if (Directory.Exists(Path.GetFullPath(QueueDir))) Directory.Delete(Path.GetFullPath(QueueDir), true);
                 if (AssetDatabase.IsValidFolder(Gift)) AssetDatabase.DeleteAsset(Gift);
                 if (Directory.Exists(Path.GetFullPath(PkgDir))) Directory.Delete(Path.GetFullPath(PkgDir), true);

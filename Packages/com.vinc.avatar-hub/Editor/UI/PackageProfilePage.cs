@@ -77,10 +77,10 @@ namespace VInc.AvatarHub.UI
         {
             if (files.Count > 1)
             {
-                // 複数ならシーケンスインポートでまとめて作る
-                window.ShowDialog("まとめて作りますか？", $"{files.Count} 個の unitypackage が選ばれました。シーケンスインポートに並べて、順番にインポートしながらプロファイルを作ります。", null,
+                // 複数なら④ インポートでまとめて作る
+                window.ShowDialog("まとめて作りますか？", $"{files.Count} 個の unitypackage が選ばれました。④ インポートに並べて、順番にインポートしながらプロファイルを作ります。", null,
                     new ViahWindow.DialogButton("やめる", null, "ghost"),
-                    new ViahWindow.DialogButton("シーケンスインポートで作る", () =>
+                    new ViahWindow.DialogButton("④ インポートで作る", () =>
                     {
                         var seq = PackageImportRunner.Sequence;
                         foreach (var f in files)
@@ -116,7 +116,7 @@ namespace VInc.AvatarHub.UI
         {
             var card = UIKit.Card();
             card.name = "card-pick";
-            card.Add(UIKit.SectionHead("1", "unitypackage を選んでください", "エクスプローラーや Project ウィンドウからドロップできます。複数を選ぶと、シーケンスインポートでまとめて作れます"));
+            card.Add(UIKit.SectionHead("1", "unitypackage を選んでください", "エクスプローラーや Project ウィンドウからドロップできます。複数を選ぶと、④ インポートでまとめて作れます"));
             card.Add(PackageUI.DropZone("ここに unitypackage をドラッグ＆ドロップ", "中身を読むだけで、まだインポートはしません。", Select));
             var row = UIKit.Row("viah-mt8");
             row.Add(UIKit.Btn("Folder Icon", "ファイルを選ぶ…", () =>

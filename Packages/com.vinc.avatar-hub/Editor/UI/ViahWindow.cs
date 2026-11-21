@@ -65,9 +65,10 @@ namespace VInc.AvatarHub.UI
             new Workflow { key = "projects", label = "プロジェクト作成", description = "決まった構成のフォルダーを一括で作る", create = () => new ProjectsPage() },
             new Workflow { key = "profiles", label = "プロファイル登録", description = "unitypackage に入れる中身を登録する", create = () => new ProfilesPage() },
             new Workflow { key = "export", label = "エクスポート", description = "unitypackage を書き出す（単発・シーケンス）", create = () => new ExportPage() },
-            new Workflow { key = "import", label = "シーケンスインポート", description = "複数の unitypackage を順番にまとめてインポートする", create = () => new ImportQueuePage() },
+            new Workflow { key = "import", label = "インポート", description = "複数の unitypackage を順番にまとめてインポートする", create = () => new ImportQueuePage() },
             new Workflow { key = "bookmarks", label = "プロジェクトブックマーカー", description = "よく使うフォルダーを登録して、Project ウィンドウですぐ飛べるようにする", create = () => new BookmarksPage() },
             new Workflow { key = "searcher", label = "アセットSearcher", description = "選んだアセットを使っているもの（マテリアル・コントローラーなど）を探す", create = () => new SearcherPage() },
+            new Workflow { key = "uploader", label = "アバターアップローダー", description = "複数のアバターを順番に続けて VRChat へアップロードする", create = () => new UploaderPage() },
         };
 
         /// <summary>配色（アクセント）の一覧。key, 表示名, 見本の色</summary>

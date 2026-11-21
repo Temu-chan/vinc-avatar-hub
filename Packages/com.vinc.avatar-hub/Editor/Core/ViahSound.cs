@@ -31,10 +31,11 @@ namespace VInc.AvatarHub
         {
             ("seq-export", "シーケンスエクスポート"),
             ("export", "単発エクスポート"),
-            ("seq-import", "シーケンスインポート"),
+            ("seq-import", "インポート"),
             ("package", "UnityPackage から作る"),
             ("search", "アセットSearcher の検索"),
             ("scan", "プロファイルの自動検出"),
+            ("upload", "アバターアップロード"),
         };
 
         /// <summary>これより早く終わったときは鳴らさない（設定でオフにできる）。</summary>

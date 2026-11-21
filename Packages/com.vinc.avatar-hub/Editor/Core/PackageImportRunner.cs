@@ -47,7 +47,7 @@ namespace VInc.AvatarHub
     public class ImportSession
     {
         public string kind = "AvatarHub.ImportQueue";
-        /// <summary>"sequence"（シーケンスインポート）/ "single"（UnityPackage から作る）</summary>
+        /// <summary>"sequence"（④ インポート）/ "single"（UnityPackage から作る）</summary>
         public string name;
         public List<ImportJob> jobs = new List<ImportJob>();
         public bool running;
@@ -139,7 +139,7 @@ namespace VInc.AvatarHub
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode) return "再生中はインポートできません。再生を止めてください。";
             var active = Active;
-            if (active != null && active != s) return active.name == "sequence" ? "シーケンスインポートの実行中です。" : "UnityPackage からの作成を実行中です。";
+            if (active != null && active != s) return active.name == "sequence" ? "④ インポートの実行中です。" : "UnityPackage からの作成を実行中です。";
             if (!s.jobs.Any(j => j.status == "waiting" || j.status == "imported")) return "インポートを待っているものがありません。";
             return null;
         }

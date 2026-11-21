@@ -228,7 +228,8 @@ namespace VInc.AvatarHub.Tests
                 log.AppendLine("  出力: " + string.Join(" | ", files));
                 return Check(count == $"選択 {rows.Count} / {rows.Count}", "Shift で全行選択: " + count)
                        & Check(done.Contains("書き出しました"), "完了ダイアログ: " + done)
-                       & Check(files.Any(f => f.StartsWith("VIAH_E2E_Ver1.0.1")), "+0.0.1 されたファイル");
+                       // 種別（Debug）を付けるかは設定しだいなので、どちらでもよい
+                       & Check(files.Any(f => f.StartsWith("VIAH_E2E_Ver1.0.1") || f.StartsWith("VIAH_E2E_Debug_Ver1.0.1")), "+0.0.1 されたファイル");
             }));
 
             window = ViahWindow.Open();

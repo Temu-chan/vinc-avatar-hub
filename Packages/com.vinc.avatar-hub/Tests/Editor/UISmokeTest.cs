@@ -103,6 +103,8 @@ namespace VInc.AvatarHub.Tests
             // キューは実際のものを汚さないよう、Temp の中に保存する
             PackageImportRunner.DirOverride = Path.GetFullPath("Temp/viah_ui_queue");
             PackageImportRunner.ResetCache();
+            AvatarUploader.DirOverride = Path.GetFullPath("Temp/viah_ui_queue");
+            AvatarUploader.ResetCache();
             var pkg = PreparePackage();
             steps.Clear();
             steps.Add(("home", () => window.Navigate("home")));
@@ -228,6 +230,40 @@ namespace VInc.AvatarHub.Tests
                 SetSearch(PkgRoot + "/Box.mat", 2, "", PkgRoot + "/Box.prefab", false);
                 window.Show(new SearcherPage());
                 Invoke("Run");
+                ScrollToEnd();
+            }));
+            steps.Add(("upload_empty", () =>
+            {
+                AvatarUploader.Session.jobs.Clear();
+                AvatarUploader.Save();
+                window.Show(new UploaderPage());
+            }));
+            steps.Add(("upload_running", () =>
+            {
+                // 画面に出すだけ（実際にはアップロードしない）
+                var s = AvatarUploader.Session;
+                s.jobs.Clear();
+                s.jobs.Add(new UploadJob { id = "u1", name = "Rusk_Casual", scenePath = "Assets/Scenes/Avatars.unity", objectPath = "Rusk_Casual", blueprintId = "avtr_0a1b2c3d-1111-2222-3333-444455556666", status = "done", seconds = 96, finishedAt = "21:04" });
+                s.jobs.Add(new UploadJob { id = "u2", name = "Rusk_Dress", scenePath = "Assets/Scenes/Avatars.unity", objectPath = "Rusk_Dress", blueprintId = "avtr_0a1b2c3d-1111-2222-3333-444455556667", remoteName = "ラスク（ドレス）", status = "uploading", phase = "アップロード中", progress = 0.42f });
+                s.jobs.Add(new UploadJob { id = "u3", name = "Rusk_Swim", scenePath = "Assets/Scenes/Avatars.unity", objectPath = "Rusk_Swim", blueprintId = "avtr_0a1b2c3d-1111-2222-3333-444455556668", status = "ready" });
+                s.jobs.Add(new UploadJob { id = "u4", name = "Rusk_Quest", scenePath = "Assets/Scenes/Quest.unity", objectPath = "Rusk_Quest", blueprintId = "avtr_0a1b2c3d-1111-2222-3333-444455556669", status = "ready" });
+                s.running = true;
+                window.Show(new UploaderPage());
+                ScrollToEnd();
+            }));
+            steps.Add(("upload_done", () =>
+            {
+                var s = AvatarUploader.Session;
+                s.running = false;
+                s.jobs[1].status = "done";
+                s.jobs[1].seconds = 131;
+                s.jobs[1].finishedAt = "21:06";
+                s.jobs[2].status = "failed";
+                s.jobs[2].message = "SDK のチェックでエラーがあります：Avatar has too many PhysBones（SDK の画面で内容を確認してください）";
+                s.jobs[3].status = "done";
+                s.jobs[3].message = "前回と中身が同じなので、アップロードは省かれました";
+                AvatarUploader.Save();
+                window.Show(new UploaderPage());
                 ScrollToEnd();
             }));
             steps.Add(("export_single", () =>
@@ -405,6 +441,8 @@ namespace VInc.AvatarHub.Tests
             EditorApplication.update -= Tick;
             PackageImportRunner.DirOverride = null;
             PackageImportRunner.ResetCache();
+            AvatarUploader.DirOverride = null;
+            AvatarUploader.ResetCache();
             if (AssetDatabase.IsValidFolder(PkgRoot)) AssetDatabase.DeleteAsset(PkgRoot);
             Application.logMessageReceived -= OnLog;
             log.Insert(0, $"RESULT errors={errors.Count}\n");
