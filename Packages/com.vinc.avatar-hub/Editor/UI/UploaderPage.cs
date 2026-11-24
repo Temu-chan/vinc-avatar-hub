@@ -37,7 +37,15 @@ namespace VInc.AvatarHub.UI
         public override string CaptureState()
         {
             var s = new UiState { stopOnError = S.stopOnError };
-            foreach (var j in S.jobs) s.jobs.Add(new UploadJob { id = j.id, name = j.name, scenePath = j.scenePath, objectPath = j.objectPath, blueprintId = j.blueprintId, remoteName = j.remoteName });
+            foreach (var j in S.jobs)
+            {
+                // 進み具合は実行のたびに変わるので入れない
+                var copy = JsonUtility.FromJson<UploadJob>(JsonUtility.ToJson(j));
+                copy.phase = "";
+                copy.progress = -1;
+                copy.shown.Clear();
+                s.jobs.Add(copy);
+            }
             return JsonUtility.ToJson(s);
         }
 
@@ -47,10 +55,25 @@ namespace VInc.AvatarHub.UI
             if (S.running) return;
             var s = JsonUtility.FromJson<UiState>(state);
             var old = S.jobs.ToDictionary(j => j.id);
-            S.jobs = s.jobs.Select(j => old.TryGetValue(j.id, out var o) ? o : j).ToList();
+            S.jobs = s.jobs.Select(j =>
+            {
+                // 途中の状態には戻さない（もう動いていないため）
+                if (!j.Finished && j.status != "cancelled" && j.status != "interrupted") j.status = "waiting";
+                // そのあとで実行したものは、実行した結果を残す（完了したものをもう一度アップロードしないため）
+                return old.TryGetValue(j.id, out var o) && o.runs != j.runs ? o : j;
+            }).ToList();
             S.stopOnError = s.stopOnError;
             AvatarUploader.Save();
             policy?.Set(S.stopOnError ? 1 : 0);
+        }
+
+        /// <summary>キューを変える操作。直前の状態（実行した結果も含む）を覚えてから変えるので、Undo で実行前の状態に戻らない。</summary>
+        void Edit(string label, Action change)
+        {
+            Committed = CaptureState();
+            change();
+            AvatarUploader.Save();
+            Commit(label);
         }
 
         // ───────────── 画面 ─────────────
@@ -116,9 +139,7 @@ namespace VInc.AvatarHub.UI
             optCard.Add(UIKit.SectionHead("3", "失敗したとき", "SDK のチェックでエラーが出たときなど"));
             policy = new Segmented(new[] { "飛ばして次へ（おすすめ）", "止める" }, S.stopOnError ? 1 : 0, i =>
             {
-                S.stopOnError = i == 1;
-                AvatarUploader.Save();
-                Commit(i == 1 ? "失敗したら止める" : "失敗したら飛ばして次へ");
+                Edit(i == 1 ? "失敗したら止める" : "失敗したら飛ばして次へ", () => S.stopOnError = i == 1);
             });
             policy.style.alignSelf = Align.FlexStart;
             optCard.Add(policy);
@@ -195,6 +216,7 @@ namespace VInc.AvatarHub.UI
         void Add(List<GameObject> objects)
         {
             var problems = new List<string>();
+            Committed = CaptureState();
             int added = AvatarUploader.Add(objects, problems);
             if (added > 0) Commit($"アップロードのキューに {added} 体追加");
             if (problems.Count == 0) return;
@@ -232,8 +254,8 @@ namespace VInc.AvatarHub.UI
             sdkBox.Clear();
             if (B == null)
             {
-                sdkBox.Add(UIKit.Hint(null, "VRChat SDK（Avatars）が入っていません",
-                    "VCC で VRChat SDK - Avatars（3.7.0 以降）を入れたプロジェクトで使えます。", "warn"));
+                sdkBox.Add(UIKit.Hint(null, "VRChat SDK（Avatars）が入っていないか、古い版です",
+                    "VCC で VRChat SDK - Avatars を 3.10.6 以降にしたプロジェクトで使えます。", "warn"));
                 return;
             }
             var grid = UIKit.Div("viah-upload-sdk");
@@ -283,23 +305,13 @@ namespace VInc.AvatarHub.UI
             head.Add(UIKit.Spacer());
             if (total > 0)
             {
-                var retry = UIKit.Btn("失敗したものをもう一度", RetryFailed, "small", "ghost");
-                retry.SetEnabled(!S.running && S.jobs.Any(j => j.status == "failed"));
+                var retry = UIKit.Btn("失敗したものをもう一度", RetryFailed, "small", "ghost").With(b => b.tooltip = "失敗したものと、同意をしなくて飛ばしたものを待機中に戻します");
+                retry.SetEnabled(!S.running && S.jobs.Any(CanRetry));
                 head.Add(retry);
-                var clearDone = UIKit.Btn("完了したものを消す", () =>
-                {
-                    S.jobs.RemoveAll(j => j.status == "done");
-                    AvatarUploader.Save();
-                    Commit("完了したものをキューから消す");
-                }, "small", "ghost", "viah-ml4");
+                var clearDone = UIKit.Btn("完了したものを消す", () => Edit("完了したものをキューから消す", () => S.jobs.RemoveAll(j => j.status == "done")), "small", "ghost", "viah-ml4");
                 clearDone.SetEnabled(!S.running && S.jobs.Any(j => j.status == "done"));
                 head.Add(clearDone);
-                var clearAll = UIKit.Btn("すべて消す", () =>
-                {
-                    S.jobs.Clear();
-                    AvatarUploader.Save();
-                    Commit("アップロードのキューをすべて消す");
-                }, "small", "ghost", "viah-ml4");
+                var clearAll = UIKit.Btn("すべて消す", () => Edit("アップロードのキューをすべて消す", () => S.jobs.Clear()), "small", "ghost", "viah-ml4");
                 clearAll.SetEnabled(!S.running);
                 head.Add(clearAll);
             }
@@ -323,15 +335,17 @@ namespace VInc.AvatarHub.UI
             progressBox.Add(UIKit.Text(text, "viah-dim", "viah-small", "viah-mt4", "viah-wrap"));
         }
 
-        void RetryFailed()
+        void RetryFailed() => Edit("失敗したものをもう一度", () =>
         {
-            foreach (var j in S.jobs.Where(x => x.status == "failed"))
+            foreach (var j in S.jobs.Where(CanRetry))
             {
                 j.status = "waiting";
                 j.message = "";
             }
-            AvatarUploader.Save();
-        }
+        });
+
+        /// <summary>やり直せるもの：失敗したものと、著作権の同意をしなくて飛ばしたもの。</summary>
+        static bool CanRetry(UploadJob j) => j.status == "failed" || j.status == "skipped";
 
         void RenderQueue()
         {
@@ -398,12 +412,7 @@ namespace VInc.AvatarHub.UI
             up.SetEnabled(movable && index > 0);
             var down = UIKit.Btn("↓", () => Move(index, +1), "small", "ghost", "viah-move-down").With(b => b.tooltip = "下へ");
             down.SetEnabled(movable && index < S.jobs.Count - 1);
-            var remove = UIKit.Btn("×", () =>
-            {
-                S.jobs.Remove(j);
-                AvatarUploader.Save();
-                Commit("アップロードのキューから外す");
-            }, "small", "ghost").With(b => b.tooltip = "キューから外す（アバターは消えません）");
+            var remove = UIKit.Btn("×", () => Edit("アップロードのキューから外す", () => S.jobs.Remove(j)), "small", "ghost").With(b => b.tooltip = "キューから外す（アバターは消えません）");
             remove.SetEnabled(!j.Busy);
             foreach (var btn in new[] { up, down, remove })
             {
@@ -418,11 +427,12 @@ namespace VInc.AvatarHub.UI
         {
             int to = index + dir;
             if (to < 0 || to >= S.jobs.Count) return;
-            var j = S.jobs[index];
-            S.jobs.RemoveAt(index);
-            S.jobs.Insert(to, j);
-            AvatarUploader.Save();
-            Commit("アップロードのキューを並べ替え");
+            Edit("アップロードのキューを並べ替え", () =>
+            {
+                var j = S.jobs[index];
+                S.jobs.RemoveAt(index);
+                S.jobs.Insert(to, j);
+            });
         }
 
         void RenderResult()
@@ -449,7 +459,7 @@ namespace VInc.AvatarHub.UI
                 row.Add(col);
                 card.Add(row);
             }
-            if (failed > 0)
+            if (failed + skipped > 0)
             {
                 var actions = UIKit.Row("viah-mt8", "viah-btn-group");
                 actions.Add(UIKit.Btn("失敗したものをもう一度", RetryFailed, "small", "primary"));
@@ -481,12 +491,7 @@ namespace VInc.AvatarHub.UI
             if (S.Complete)
             {
                 footer.Add(UIKit.Text("", "viah-grow"));
-                footer.Add(UIKit.Btn("キューを空にする", () =>
-                {
-                    S.jobs.Clear();
-                    AvatarUploader.Save();
-                    Commit("アップロードのキューを空にする");
-                }, "big"));
+                footer.Add(UIKit.Btn("キューを空にする", () => Edit("アップロードのキューを空にする", () => S.jobs.Clear()), "big"));
                 return;
             }
             var reason = AvatarUploader.CannotStart();

@@ -36,6 +36,10 @@ namespace VInc.AvatarHub
         /// <summary>ビルドとアップロードにかかった秒数。</summary>
         public double seconds;
         public string finishedAt = "";
+        /// <summary>アップロードの間だけ表示にしているもの（Hierarchy の場所）。途中で再読み込みされたときに戻すため。</summary>
+        public List<string> shown = new List<string>();
+        /// <summary>アップロードしようとした回数。Undo で、実行した結果を古い状態に戻さないため。</summary>
+        public int runs;
 
         public string DisplayName => string.IsNullOrEmpty(remoteName) || remoteName == name ? name : $"{name}（VRChat：{remoteName}）";
         public string SceneName => string.IsNullOrEmpty(scenePath) ? "保存していないシーン" : Path.GetFileNameWithoutExtension(scenePath);
@@ -59,6 +63,9 @@ namespace VInc.AvatarHub
         public bool stopAfterCurrent;
         /// <summary>止まった理由など（画面に出す）。</summary>
         public string notice = "";
+        /// <summary>アップロードのために追加で開いているシーン（無ければ空）。</summary>
+        public string openedScene = "";
+        public bool openedSceneListed;
 
         public int DoneCount => jobs.Count(j => j.Finished);
         public bool Complete => jobs.Count > 0 && jobs.All(j => j.Finished);
@@ -128,8 +135,6 @@ namespace VInc.AvatarHub
 
         static UploadSession session;
         static CancellationTokenSource cts;
-        static SceneSetup[] originalScenes;
-        static bool scenesSwitched;
         static double lastPing;
 
         /// <summary>このドメインで実行中か（リロードすると false に戻る）。</summary>
@@ -155,6 +160,8 @@ namespace VInc.AvatarHub
                 session ??= new UploadSession();
                 session.jobs ??= new List<UploadJob>();
                 session.notice ??= "";
+                session.openedScene ??= "";
+                foreach (var j in session.jobs) j.shown ??= new List<string>();
                 return session;
             }
         }
@@ -193,7 +200,13 @@ namespace VInc.AvatarHub
                 j.message = wasUploading ? "Unity の再読み込み（コンパイルなど）で中断されました。VRChat に上がったかは SDK の画面（Content Manager）で確認してください。" : "";
                 j.phase = "";
                 j.progress = -1;
+                // アップロードの間だけ表示にしていたものを戻す
+                var go = j.shown.Count > 0 ? Find(j) : null;
+                for (var t = go != null ? go.transform : null; t != null; t = t.parent)
+                    if (j.shown.Contains(PathOf(t))) t.gameObject.SetActive(false);
+                j.shown.Clear();
             }
+            CloseOpenedScene(s);
             s.running = false;
             s.notice = "Unity の再読み込みで止まりました。「続きを開始」でもう一度始められます。";
             Save();
@@ -230,7 +243,7 @@ namespace VInc.AvatarHub
         {
             if (Backend == null)
             {
-                problems.Add("VRChat SDK（Avatars）が入っていません");
+                problems.Add("VRChat SDK（Avatars）3.10.6 以降が入っていません");
                 return 0;
             }
             var s = Session;
@@ -278,22 +291,24 @@ namespace VInc.AvatarHub
             return added;
         }
 
-        /// <summary>キューの行のアバターをシーンから探す（ID で探し、同じ ID が複数あればシーンと場所で絞る）。</summary>
-        public static GameObject Find(UploadJob j)
+        /// <summary>キューの行のアバターを、開いているシーンから探す。</summary>
+        public static GameObject Find(UploadJob j) => Find(j, out _);
+
+        /// <summary>
+        /// キューの行のアバターを探す。同じ ID のコピーが別のシーンにあっても取り違えないよう、登録したシーンの中だけを見る。
+        /// 同じシーンに同じ ID が複数あるときは Hierarchy の場所で決め、決められなければ error に理由を入れて null を返す。
+        /// </summary>
+        static GameObject Find(UploadJob j, out string error)
         {
+            error = null;
             if (Backend == null) return null;
             var hits = LoadedAvatars().Where(g => Backend.BlueprintId(g) == j.blueprintId).ToList();
-            if (hits.Count > 1 && !string.IsNullOrEmpty(j.scenePath))
-            {
-                var inScene = hits.Where(g => g.scene.path == j.scenePath).ToList();
-                if (inScene.Count > 0) hits = inScene;
-            }
-            if (hits.Count > 1)
-            {
-                var atPath = hits.FirstOrDefault(g => PathOf(g.transform) == j.objectPath);
-                if (atPath != null) return atPath;
-            }
-            return hits.FirstOrDefault();
+            if (!string.IsNullOrEmpty(j.scenePath)) hits = hits.Where(g => g.scene.path == j.scenePath).ToList();
+            if (hits.Count <= 1) return hits.FirstOrDefault();
+            var atPath = hits.Where(g => PathOf(g.transform) == j.objectPath).ToList();
+            if (atPath.Count == 1) return atPath[0];
+            error = $"同じアバター ID のアバターが {hits.Count} 体あり、どれをアップロードするか決められません";
+            return null;
         }
 
         // ───────────── 実行 ─────────────
@@ -301,7 +316,7 @@ namespace VInc.AvatarHub
         /// <summary>始められない理由（始められるなら null）。</summary>
         public static string CannotStart()
         {
-            if (Backend == null) return "VRChat SDK（Avatars）が入っていません。VCC で入れてください。";
+            if (Backend == null) return "VRChat SDK（Avatars）3.10.6 以降が入っていません。VCC で入れるか、更新してください。";
             if (EditorApplication.isPlayingOrWillChangePlaymode) return "再生中はアップロードできません。再生を止めてください。";
             if (EditorApplication.isCompiling) return "スクリプトのコンパイル中です。終わるまで待ってください。";
             if (Session.running || Working) return "アップロード中です。";
@@ -310,37 +325,24 @@ namespace VInc.AvatarHub
             return null;
         }
 
-        /// <summary>シーンを開き直す必要がある行があるか（そのシーンが今開いていない）。</summary>
-        static bool NeedsSceneSwitch(UploadSession s) => s.jobs.Where(j => j.Runnable).Any(j => Find(j) == null && !string.IsNullOrEmpty(j.scenePath));
-
-        static bool AnyDirtyScene()
-        {
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-                if (SceneManager.GetSceneAt(i).isDirty) return true;
-            return false;
-        }
-
         /// <summary>始める。準備（同意）→ 順番にビルドとアップロード。終わるまで待つ Task を返す（画面からは待たなくてよい）。</summary>
         public static Task Start()
         {
             if (CannotStart() != null) return Task.CompletedTask;
             var s = Session;
-            // 別のシーンのアバターがあるときは、シーンを切り替えるので先に保存してもらう
-            if (NeedsSceneSwitch(s) && AnyDirtyScene() && !EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return Task.CompletedTask;
             foreach (var j in s.jobs.Where(x => x.Runnable))
             {
                 j.status = "waiting";
                 j.message = "";
                 j.phase = "";
                 j.progress = -1;
+                j.runs++;
             }
             s.running = true;
             s.stopAfterCurrent = false;
             s.notice = "";
             s.startedAt = EditorApplication.timeSinceStartup;
             Save();
-            originalScenes = EditorSceneManager.GetSceneManagerSetup();
-            scenesSwitched = false;
             cts = new CancellationTokenSource();
             Current = RunSafe(s, cts.Token);
             return Current;
@@ -390,7 +392,7 @@ namespace VInc.AvatarHub
                     j.phase = "";
                     j.progress = -1;
                 }
-                RestoreScenes();
+                CloseOpenedScene(s);
                 bool userStopped = s.stopAfterCurrent;
                 s.running = false;
                 s.stopAfterCurrent = false;
@@ -414,7 +416,8 @@ namespace VInc.AvatarHub
         {
             var b = Backend;
             int failed = 0;
-            if (!await EnsurePanel(s, b, ct)) return (0, true);
+            // 始めるときは、すでに開いていても SDK の画面を前に出す（同意の確認が隠れて止まって見えないように）
+            if (!await EnsurePanel(s, b, ct, true)) return (0, !ct.IsCancellationRequested);
 
             // 1. 準備と著作権の同意（ここだけ人の操作が要る。終われば、あとは止まらずに続く）
             foreach (var j in s.jobs.Where(x => x.status == "waiting").ToList())
@@ -434,7 +437,7 @@ namespace VInc.AvatarHub
             {
                 if (ct.IsCancellationRequested || s.stopAfterCurrent) return (failed, false);
                 if (!s.jobs.Contains(j)) continue;
-                if (!await EnsurePanel(s, b, ct)) return (failed, true);
+                if (!await EnsurePanel(s, b, ct, false)) return (failed, !ct.IsCancellationRequested);
                 await UploadOne(s, b, j, ct);
                 if (j.status == "cancelled") return (failed, false);
                 if (j.status == "failed")
@@ -452,11 +455,12 @@ namespace VInc.AvatarHub
             return true;
         }
 
-        /// <summary>SDK の画面を開いて、ログインを待つ。</summary>
-        static async Task<bool> EnsurePanel(UploadSession s, IAvatarUploadBackend b, CancellationToken ct)
+        /// <summary>SDK の画面を開いて、ログインを待つ。show なら、すでに開いていても前に出す。</summary>
+        static async Task<bool> EnsurePanel(UploadSession s, IAvatarUploadBackend b, CancellationToken ct, bool show)
         {
-            if (b.PanelOpen && b.LoggedIn) return true;
+            if (!show && b.PanelOpen && b.LoggedIn) return true;
             b.OpenPanel();
+            if (b.PanelOpen && b.LoggedIn) return true;
             var until = EditorApplication.timeSinceStartup + WaitSeconds;
             while (!(b.PanelOpen && b.LoggedIn))
             {
@@ -511,9 +515,8 @@ namespace VInc.AvatarHub
 
         static async Task UploadOne(UploadSession s, IAvatarUploadBackend b, UploadJob j, CancellationToken ct)
         {
-            var go = Find(j);
-            string error = null;
-            if (go == null && OpenSceneOf(j, out error)) go = Find(j);
+            var go = Find(j, out var error);
+            if (go == null && error == null && OpenSceneOf(s, j, out error)) go = Find(j, out error);
             if (go == null)
             {
                 Fail(j, error ?? "アバターが見つかりません（シーンが閉じられたか、名前・ID が変わった可能性があります）");
@@ -521,7 +524,7 @@ namespace VInc.AvatarHub
                 return;
             }
 
-            var restore = ShowWhileUploading(go, out bool wasHidden);
+            var restore = ShowWhileUploading(j, go, out bool wasHidden);
             var started = EditorApplication.timeSinceStartup;
             j.status = "building";
             j.phase = "ビルドの準備中";
@@ -548,6 +551,12 @@ namespace VInc.AvatarHub
                 j.status = "cancelled";
                 j.message = "中止しました";
             }
+            catch (Exception) when (ct.IsCancellationRequested)
+            {
+                // 取り消しを、SDK が別の例外（Request Cancelled など）で知らせることがある
+                j.status = "cancelled";
+                j.message = "中止しました";
+            }
             catch (AvatarUploadException e) when (e.kind == "unchanged")
             {
                 j.status = "done";
@@ -567,26 +576,42 @@ namespace VInc.AvatarHub
             }
         }
 
-        /// <summary>非表示のアバター（親が非表示のときも）は、アップロードの間だけ表示にする。戻す処理を返す。</summary>
-        static Action ShowWhileUploading(GameObject go, out bool wasHidden)
+        /// <summary>
+        /// 非表示のアバター（親が非表示のときも）は、アップロードの間だけ表示にする。戻す処理を返す。
+        /// SDK がその間にシーンを保存したときは、表示にしたままの状態がファイルに残らないよう、戻してから保存し直す。
+        /// </summary>
+        static Action ShowWhileUploading(UploadJob j, GameObject go, out bool wasHidden)
         {
             var changed = new List<GameObject>();
+            j.shown.Clear();
             for (var t = go.transform; t != null; t = t.parent)
             {
                 if (t.gameObject.activeSelf) continue;
                 t.gameObject.SetActive(true);
                 changed.Add(t.gameObject);
+                j.shown.Add(PathOf(t));
             }
             wasHidden = changed.Count > 0;
+            var scene = go.scene;
+            var stamp = FileStamp(scene.path);
             return () =>
             {
                 foreach (var g in changed)
                     if (g != null) g.SetActive(false);
+                j.shown.Clear();
+                if (changed.Count > 0 && scene.IsValid() && scene.isLoaded && stamp != FileStamp(scene.path)) EditorSceneManager.SaveScene(scene);
             };
         }
 
-        /// <summary>アバターのシーンが開いていなければ開く（保存していない変更は保存する。始めるときに確認済み）。</summary>
-        static bool OpenSceneOf(UploadJob j, out string error)
+        /// <summary>シーンのファイルが書き換わったかを見るための目印。</summary>
+        static string FileStamp(string path) =>
+            string.IsNullOrEmpty(path) || !File.Exists(path) ? "" : new FileInfo(path).Length + ":" + File.GetLastWriteTimeUtc(path).Ticks;
+
+        /// <summary>
+        /// アバターのシーンが開いていなければ、今のシーンに追加で開く。
+        /// 開いているシーンは閉じないので、保存していない変更を保存することも、捨てることもない。
+        /// </summary>
+        static bool OpenSceneOf(UploadSession s, UploadJob j, out string error)
         {
             error = null;
             if (!SceneExists(j.scenePath))
@@ -594,17 +619,20 @@ namespace VInc.AvatarHub
                 error = "アバターが見つかりません（シーンが閉じられたか、削除された可能性があります）";
                 return false;
             }
-            var loaded = SceneManager.GetSceneByPath(j.scenePath);
-            if (loaded.IsValid() && loaded.isLoaded)
+            var listed = SceneManager.GetSceneByPath(j.scenePath);
+            if (listed.IsValid() && listed.isLoaded)
             {
                 error = $"シーン「{j.SceneName}」の中にアバターが見つかりません（名前や ID が変わった可能性があります）";
                 return false;
             }
             try
             {
-                if (AnyDirtyScene()) EditorSceneManager.SaveOpenScenes();
-                EditorSceneManager.OpenScene(j.scenePath, OpenSceneMode.Single);
-                scenesSwitched = true;
+                CloseOpenedScene(s);
+                // Hierarchy に「読み込んでいないシーン」として並んでいたものは、終わっても並びから外さない
+                s.openedSceneListed = listed.IsValid();
+                EditorSceneManager.OpenScene(j.scenePath, OpenSceneMode.Additive);
+                s.openedScene = j.scenePath;
+                Save();
                 return true;
             }
             catch (Exception e)
@@ -614,24 +642,22 @@ namespace VInc.AvatarHub
             }
         }
 
-        /// <summary>シーンを切り替えていたら、始める前の状態に戻す。</summary>
-        static void RestoreScenes()
+        /// <summary>アップロードのために追加で開いたシーンを、保存せずに閉じる（自分で開いたものだけ）。</summary>
+        static void CloseOpenedScene(UploadSession s)
         {
-            if (!scenesSwitched || originalScenes == null || originalScenes.Length == 0) return;
-            scenesSwitched = false;
+            if (string.IsNullOrEmpty(s.openedScene)) return;
+            var scene = SceneManager.GetSceneByPath(s.openedScene);
+            s.openedScene = "";
             try
             {
-                if (AnyDirtyScene()) EditorSceneManager.SaveOpenScenes();
-                if (originalScenes.All(x => SceneExists(x.path)))
-                    EditorSceneManager.RestoreSceneManagerSetup(originalScenes);
+                if (scene.IsValid() && scene.isLoaded && SceneManager.sceneCount > 1) EditorSceneManager.CloseScene(scene, !s.openedSceneListed);
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Avatar Hub] 元のシーンに戻せませんでした: " + e.Message);
+                Debug.LogWarning("[Avatar Hub] アップロードのために開いたシーンを閉じられませんでした: " + e.Message);
             }
         }
 
-        /// <summary>シーンのファイルがあるか（Packages の中のシーンは File.Exists では見つからないことがあるので AssetDatabase で見る）。</summary>
         static bool SceneExists(string path) => !string.IsNullOrEmpty(path) && AssetDatabase.LoadAssetAtPath<SceneAsset>(path) != null;
 
         static void Fail(UploadJob j, string message)

@@ -16,7 +16,7 @@ using VRC.SDKBase.Editor.Api;
 namespace VInc.AvatarHub.VRChat
 {
     /// <summary>
-    /// ⑦ アバターアップローダーの、VRChat SDK を呼ぶ部分。VRChat SDK（Avatars 3.7.0 以降）が入っているときだけコンパイルされる。
+    /// ⑦ アバターアップローダーの、VRChat SDK を呼ぶ部分。VRChat SDK（Avatars 3.10.6 以降）が入っているときだけコンパイルされる。
     /// アップロードは SDK の公開 API（IVRCSdkAvatarBuilderApi.BuildAndUpload）で行うので、SDK の画面が開いている必要がある。
     /// </summary>
     [InitializeOnLoad]
@@ -68,6 +68,8 @@ namespace VInc.AvatarHub.VRChat
             var w = VRCSdkControlPanel.window;
             if (w == null) return;
             w.Show();
+            // ほかのタブに隠れていることがあるので前に出す
+            w.Focus();
             if (LoggedIn) ShowBuilderTab(w);
         }
 
@@ -122,25 +124,16 @@ namespace VInc.AvatarHub.VRChat
         public async Task Agree(string blueprintId, CancellationToken ct)
         {
             if (!fetched.TryGetValue(blueprintId, out var avatar)) throw new AvatarUploadException("アバターの情報がありません（準備に失敗しています）");
-            // 古い SDK には同意が無い
-            var type = typeof(VRCApi).Assembly.GetType("VRC.SDKBase.VRCCopyrightAgreement");
-            var check = type?.GetMethod("CheckCopyrightAgreement", BindingFlags.Public | BindingFlags.Static);
-            if (check == null) return;
-
             // 同意の確認に使うのは Pipeline Manager の Blueprint ID だけなので、シーンを開かなくてすむように仮のものを作る
-            var temp = new GameObject("VIAH_CopyrightCheck") { hideFlags = HideFlags.HideAndDontSave };
+            var temp = EditorUtility.CreateGameObjectWithHideFlags("VIAH_CopyrightCheck", HideFlags.HideAndDontSave);
             try
             {
                 var pm = temp.AddComponent<PipelineManager>();
                 pm.blueprintId = blueprintId;
-                var task = (Task)check.Invoke(null, new object[] { pm, avatar });
+                var task = VRCCopyrightAgreement.CheckCopyrightAgreement(pm, avatar);
                 var cancel = Task.Delay(Timeout.Infinite, ct);
                 if (await Task.WhenAny(task, cancel) == cancel) throw new OperationCanceledException(ct);
                 await task;
-            }
-            catch (TargetInvocationException e) when (e.InnerException != null)
-            {
-                throw Translate(e.InnerException, true);
             }
             catch (OperationCanceledException)
             {
@@ -181,17 +174,37 @@ namespace VInc.AvatarHub.VRChat
             builder.OnSdkBuildProgress += OnBuildProgress;
             builder.OnSdkUploadStart += OnUploadStart;
             builder.OnSdkUploadProgress += OnUploadProgress;
+            // SDK は、アップロードしなかったとき（Dry Run の設定・通信切れ）も例外を出さずに終わることがある。
+            // 完了の通知が来たときだけ「完了」にする
+            bool succeeded = false;
+            void OnUploadSuccess(object sender, string avatarId) => succeeded = true;
+            builder.OnSdkUploadSuccess += OnUploadSuccess;
             try
             {
                 // SDK の画面にも、いまのアバターを出す
                 try { builder.SelectAvatar(avatar); }
                 catch (Exception e) { Debug.Log("[Avatar Hub] SDK の画面でアバターを選べませんでした: " + e.Message); }
                 report("ビルドの準備中", -1, false);
-                await builder.BuildAndUpload(avatar, info, null, ct);
+                // SDK の「Build & Publish」と同じく、プラットフォームごとの差し替え（Per-Platform Overrides）も使う
+                await builder.BuildAndUpload(avatar, PerPlatformOverrides.GetPlatformOverrides(avatar), info, null, ct);
+                if (!succeeded)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    throw new AvatarUploadException("SDK からアップロード完了の通知がありませんでした。SDK の設定（Settings）の Dry Run Builds がオンになっていないか、通信が切れていないか確認してください");
+                }
+            }
+            catch (Exception e) when (succeeded)
+            {
+                // アップロードは終わっている（そのあとの片付けでのエラー）
+                Debug.LogWarning("[Avatar Hub] アップロードのあとで SDK がエラーを出しました: " + e.Message);
             }
             catch (OperationCanceledException)
             {
                 throw;
+            }
+            catch (Exception) when (ct.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(ct);
             }
             catch (Exception e)
             {
@@ -203,6 +216,7 @@ namespace VInc.AvatarHub.VRChat
                 builder.OnSdkBuildProgress -= OnBuildProgress;
                 builder.OnSdkUploadStart -= OnUploadStart;
                 builder.OnSdkUploadProgress -= OnUploadProgress;
+                builder.OnSdkUploadSuccess -= OnUploadSuccess;
             }
         }
 

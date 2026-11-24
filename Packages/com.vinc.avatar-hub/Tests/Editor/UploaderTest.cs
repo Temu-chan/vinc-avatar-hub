@@ -9,6 +9,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UIElements;
 
 namespace VInc.AvatarHub.Tests
 {
@@ -54,7 +55,9 @@ namespace VInc.AvatarHub.Tests
             public readonly HashSet<string> unchanged = new HashSet<string>();
             public readonly HashSet<string> slow = new HashSet<string>();
             public readonly Dictionary<string, bool> activeAtUpload = new Dictionary<string, bool>();
-            public bool panelOpen = true, loggedIn = true, openWorks = true, cancelled;
+            /// <summary>アップロードしたときにアバターがあったシーン。</summary>
+            public readonly Dictionary<string, string> sceneAtUpload = new Dictionary<string, string>();
+            public bool panelOpen = true, loggedIn = true, openWorks = true, cancelled, saveSceneDuringUpload, cancelAsError;
 
             public string SdkVersion => "fake";
             public List<GameObject> FindAvatars(GameObject root) =>
@@ -91,13 +94,19 @@ namespace VInc.AvatarHub.Tests
                 var id = BlueprintId(avatar);
                 events.Add("upload:" + id);
                 activeAtUpload[id] = avatar.activeInHierarchy;
+                sceneAtUpload[id] = avatar.scene.path;
+                if (saveSceneDuringUpload) EditorSceneManager.SaveScene(avatar.scene);
                 report("ビルド中", -1, false);
                 await Task.Delay(10);
                 if (slow.Contains(id))
                 {
                     for (int i = 0; i < 200 && slow.Contains(id) && !ct.IsCancellationRequested && !cancelled; i++) await Task.Delay(10);
                 }
-                if (ct.IsCancellationRequested || cancelled) throw new OperationCanceledException();
+                if (ct.IsCancellationRequested || cancelled)
+                {
+                    if (cancelAsError) throw new AvatarUploadException("アップロードに失敗しました：Request Cancelled");
+                    throw new OperationCanceledException();
+                }
                 report("アップロード中", 0.5f, true);
                 await Task.Delay(10);
                 if (failUpload.Contains(id)) throw new AvatarUploadException("SDK のチェックでエラーがあります：テスト");
@@ -140,6 +149,12 @@ namespace VInc.AvatarHub.Tests
             AvatarUploader.DirOverride = Path.Combine(work, "lib");
             AvatarUploader.ResetCache();
             real = AvatarUploader.Backend;
+            // バッチモードでは名前の無いシーンで始まるので、保存しておく（シーンを追加で作れるように）
+            if (Application.isBatchMode && SceneManager.GetActiveScene().path == "")
+            {
+                if (!AssetDatabase.IsValidFolder(SceneDir)) AssetDatabase.CreateFolder("Assets", "VIAH_UploadTest");
+                EditorSceneManager.SaveScene(SceneManager.GetActiveScene(), SceneDir + "/Base.unity");
+            }
             ViahSound.Played -= OnPlayed;
             ViahSound.Played += OnPlayed;
             AvatarUploader.Changed -= OnChanged;
@@ -362,6 +377,7 @@ namespace VInc.AvatarHub.Tests
             Check(lastAgree >= 0 && firstUpload > lastAgree, "全員分の同意が終わってからアップロードを始める");
             var order = ev.Where(e => e.StartsWith("upload:")).Select(e => e.Substring(7)).ToList();
             Check(order.SequenceEqual(new[] { "avtr_1", "avtr_2", "avtr_3", "avtr_4", "avtr_5" }), "キューの順番にアップロード：" + string.Join(",", order));
+            Check(ev.Count > 0 && ev[0] == "open", "SDK の画面がすでに開いていても、始めるときに前に出す：" + ev.FirstOrDefault());
             Check(seenStatus.Any(x => x.EndsWith(":agreeing")) && seenStatus.Any(x => x.EndsWith(":building")) && seenStatus.Any(x => x.EndsWith(":uploading")), "同意待ち → ビルド中 → アップロード中 を通る");
             Check(s.jobs.All(j => j.remoteName == "Remote " + j.blueprintId), "VRChat 上の名前を覚える");
             Check(s.jobs.All(j => !string.IsNullOrEmpty(j.finishedAt)), "終わった時刻を覚える");
@@ -538,57 +554,312 @@ namespace VInc.AvatarHub.Tests
             AvatarUploader.Backend = fake;
         }
 
-        static bool sceneSkip;
-        static string[] scenesBefore;
+        static string PathA => SceneDir + "/A.unity";
+        static string PathB => SceneDir + "/B.unity";
+        static string PathD => SceneDir + "/D.unity";
+        static string[] layoutBefore;
+        static string hashA, hashB, hashD, activeBefore;
 
-        /// <summary>閉じているシーンのアバター：そのシーンを開いてアップロードし、最後に元のシーンに戻す。</summary>
+        static string Hash(string path)
+        {
+            using (var md5 = System.Security.Cryptography.MD5.Create()) return BitConverter.ToString(md5.ComputeHash(File.ReadAllBytes(path)));
+        }
+
+        static string[] Layout() => Enumerable.Range(0, SceneManager.sceneCount).Select(SceneManager.GetSceneAt)
+            .Select(x => $"{x.path}|{x.isLoaded}").ToArray();
+
+        static Scene NewSaved(string path, params GameObject[] objects)
+        {
+            if (!AssetDatabase.IsValidFolder(SceneDir)) AssetDatabase.CreateFolder("Assets", "VIAH_UploadTest");
+            var sc = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+            foreach (var o in objects) SceneManager.MoveGameObjectToScene(o, sc);
+            EditorSceneManager.SaveScene(sc, path);
+            return sc;
+        }
+
+        static void CloseAll()
+        {
+            if (testScene.IsValid() && testScene.isLoaded && testScene.path == "") EditorSceneManager.CloseScene(testScene, true);
+            testScene = default;
+            foreach (var p in new[] { PathA, PathB, PathD })
+            {
+                var sc = SceneManager.GetSceneByPath(p);
+                if (sc.IsValid() && SceneManager.sceneCount > 1) EditorSceneManager.CloseScene(sc, true);
+            }
+        }
+
+        static GameObject Root(string path, string name) =>
+            SceneManager.GetSceneByPath(path).GetRootGameObjects().FirstOrDefault(g => g.name == name);
+
+        static void NewFake()
+        {
+            fake = new Fake();
+            AvatarUploader.Backend = fake;
+            fake.idsByName["AvatarSceneA"] = "avtr_sa";
+            fake.idsByName["AvatarSceneB"] = "avtr_sb";
+            fake.idsByName["AvatarSceneBCopy"] = "avtr_sb";
+            fake.idsByName["AvatarSceneD"] = "avtr_sd";
+            sounds.Clear();
+        }
+
+        static void WaitRun(string name) => Wait(name + "：終わるのを待つ", () => AvatarUploader.Current.IsCompleted && !AvatarUploader.Working);
+
         static void SceneSwitchSteps()
         {
-            Do("シーンの切り替え：準備", () =>
+            // ── 閉じているシーン：追加で開いて、保存せずに閉じる。開いているシーンには触らない ──
+            Do("別のシーン：準備", () =>
             {
-                if (testScene.IsValid() && testScene.isLoaded && testScene.path == "") EditorSceneManager.CloseScene(testScene, true);
-                testScene = default;
-                var loaded = Enumerable.Range(0, SceneManager.sceneCount).Select(SceneManager.GetSceneAt).ToList();
-                sceneSkip = loaded.Any(x => x.isDirty || string.IsNullOrEmpty(x.path));
-                if (sceneSkip)
-                {
-                    log.Add("SKIP シーンの切り替え（保存していないシーンがあるため）");
-                    return;
-                }
-                fake = new Fake();
-                AvatarUploader.Backend = fake;
-                if (!AssetDatabase.IsValidFolder(SceneDir)) AssetDatabase.CreateFolder("Assets", "VIAH_UploadTest");
-                var a = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+                CloseAll();
+                NewFake();
                 var avA = new GameObject("AvatarSceneA");
-                SceneManager.MoveGameObjectToScene(avA, a);
-                EditorSceneManager.SaveScene(a, SceneDir + "/A.unity");
-                var b = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+                // 同じ ID のコピーが、開いている別のシーンにある
+                var a = NewSaved(PathA, avA, new GameObject("AvatarSceneBCopy"));
                 var avB = new GameObject("AvatarSceneB");
-                SceneManager.MoveGameObjectToScene(avB, b);
-                EditorSceneManager.SaveScene(b, SceneDir + "/B.unity");
-                fake.idsByName["AvatarSceneA"] = "avtr_sa";
-                fake.idsByName["AvatarSceneB"] = "avtr_sb";
+                avB.SetActive(false);
+                var b = NewSaved(PathB, avB);
+                var avD = new GameObject("AvatarSceneD");
+                var d = NewSaved(PathD, avD);
                 var s = AvatarUploader.Session;
                 s.jobs.Clear();
-                AvatarUploader.Add(new[] { avA, avB }, new List<string>());
-                Check(s.jobs.Count == 2 && s.jobs[1].scenePath == SceneDir + "/B.unity", "シーンの場所を覚える：" + s.jobs.LastOrDefault()?.scenePath);
+                s.stopOnError = false;
+                AvatarUploader.Add(new[] { avA, avB, avD }, new List<string>());
+                Check(s.jobs.Count == 3 && s.jobs[1].scenePath == PathB, "シーンの場所を覚える");
                 EditorSceneManager.CloseScene(b, true);
-                scenesBefore = Enumerable.Range(0, SceneManager.sceneCount).Select(i => SceneManager.GetSceneAt(i).path).ToArray();
-                Check(AvatarUploader.Find(s.jobs[1]) == null, "閉じたシーンのアバターは見つからない");
+                // 並んでいるが読み込んでいないシーン
+                EditorSceneManager.CloseScene(d, false);
+                // 保存していない変更
+                SceneManager.MoveGameObjectToScene(new GameObject("UnsavedEdit"), a);
+                EditorSceneManager.MarkSceneDirty(a);
+                layoutBefore = Layout();
+                activeBefore = SceneManager.GetActiveScene().path;
+                hashA = Hash(PathA);
+                hashB = Hash(PathB);
+                hashD = Hash(PathD);
+                Check(AvatarUploader.Find(s.jobs[1]) == null, "同じ ID のコピーが開いていても、登録したシーンが閉じていれば取り違えない");
                 AvatarUploader.Start();
             });
-            Wait("シーンの切り替え：終わるのを待つ", () => sceneSkip || (AvatarUploader.Current.IsCompleted && !AvatarUploader.Working));
-            Do("シーンの切り替え：確認", () =>
+            WaitRun("別のシーン");
+            Do("別のシーン：確認", () =>
             {
-                if (sceneSkip) return;
                 var s = AvatarUploader.Session;
-                Check(s.jobs.All(j => j.status == "done"), "閉じていたシーンを開いてアップロード：" + string.Join(",", s.jobs.Select(j => j.status + " " + j.message)));
-                Check(fake.events.Contains("upload:avtr_sb"), "閉じていたシーンのアバターもアップロードした");
-                var now = Enumerable.Range(0, SceneManager.sceneCount).Select(i => SceneManager.GetSceneAt(i).path).ToArray();
-                Check(now.SequenceEqual(scenesBefore), "終わったら元のシーンに戻す：" + string.Join(",", now));
-                var a = SceneManager.GetSceneByPath(SceneDir + "/A.unity");
-                if (a.IsValid() && a.isLoaded) EditorSceneManager.CloseScene(a, true);
+                Check(s.jobs.All(j => j.status == "done"), "閉じているシーンのアバターもアップロード：" + string.Join(",", s.jobs.Select(j => j.status + " " + j.message)));
+                Check(fake.sceneAtUpload.TryGetValue("avtr_sb", out var from) && from == PathB, "コピーではなく、登録したシーンのアバターを上げる：" + from);
+                Check(fake.sceneAtUpload.TryGetValue("avtr_sd", out var fromD) && fromD == PathD, "並んでいるが読み込んでいないシーンも読み込んで上げる");
+                Check(fake.activeAtUpload.TryGetValue("avtr_sb", out var on) && on, "閉じているシーンの非表示のアバターも、アップロードの間は表示");
+                Check(Layout().SequenceEqual(layoutBefore), "シーンの並びと読み込みの状態が元どおり：" + string.Join(" / ", Layout()));
+                Check(SceneManager.GetActiveScene().path == activeBefore, "アクティブなシーンは変わらない");
+                var a = SceneManager.GetSceneByPath(PathA);
+                Check(a.isLoaded && a.isDirty && Root(PathA, "UnsavedEdit") != null, "開いているシーンの保存していない変更が残る（捨てない）");
+                Check(Hash(PathA) == hashA, "開いているシーンを勝手に保存しない");
+                Check(Hash(PathB) == hashB && Hash(PathD) == hashD, "追加で開いたシーンを保存しない");
+                Check(s.openedScene == "", "追加で開いたシーンの記録が残らない");
+            });
+
+            // ── SDK がビルドの中でシーンを保存したとき ──
+            Do("SDK がシーンを保存：準備", () =>
+            {
+                NewFake();
+                fake.saveSceneDuringUpload = true;
+                var s = AvatarUploader.Session;
+                s.jobs.Clear();
+                s.jobs.Add(new UploadJob { id = "sb", name = "AvatarSceneB", scenePath = PathB, objectPath = "AvatarSceneB", blueprintId = "avtr_sb" });
+                AvatarUploader.Start();
+            });
+            WaitRun("SDK がシーンを保存");
+            Do("SDK がシーンを保存：確認", () =>
+            {
+                Check(AvatarUploader.Session.jobs[0].status == "done", "アップロードは完了");
+                EditorSceneManager.OpenScene(PathB, OpenSceneMode.Additive);
+                var av = Root(PathB, "AvatarSceneB");
+                Check(av != null && !av.activeSelf, "表示にしたままの状態がシーンのファイルに残らない");
+                EditorSceneManager.CloseScene(SceneManager.GetSceneByPath(PathB), true);
+            });
+
+            // ── 同じシーンに同じ ID が複数 ──
+            Do("同じ ID が複数：準備", () =>
+            {
+                NewFake();
+                fake.idsByName["AvatarSceneA"] = "avtr_sb";
+                var s = AvatarUploader.Session;
+                s.jobs.Clear();
+                s.jobs.Add(new UploadJob { id = "dup", name = "AvatarX", scenePath = PathA, objectPath = "AvatarX", blueprintId = "avtr_sb" });
+                AvatarUploader.Start();
+            });
+            WaitRun("同じ ID が複数");
+            Do("同じ ID が複数：確認", () =>
+            {
+                var j = AvatarUploader.Session.jobs[0];
+                Check(j.status == "failed" && j.message.Contains("同じアバター ID"), "決められないときは上げずに理由を出す：" + j.message);
+                Check(!fake.events.Any(e => e.StartsWith("upload:")), "間違ったアバターを上げない");
+            });
+
+            // ── 保存していない新しいシーンを開いているとき ──
+            Do("新しいシーンを開いたまま：準備", () =>
+            {
+                CloseAll();
+                MakeScene();
+                NewFake();
+                var s = AvatarUploader.Session;
+                s.jobs.Clear();
+                s.jobs.Add(new UploadJob { id = "sb", name = "AvatarSceneB", scenePath = PathB, objectPath = "AvatarSceneB", blueprintId = "avtr_sb" });
+                layoutBefore = Layout();
+                AvatarUploader.Start();
+            });
+            WaitRun("新しいシーンを開いたまま");
+            Do("新しいシーンを開いたまま：確認", () =>
+            {
+                var j = AvatarUploader.Session.jobs[0];
+                Check(j.status == "done", "保存していない新しいシーンがあっても上げられる：" + j.status + " " + j.message);
+                Check(Layout().SequenceEqual(layoutBefore) && root != null, "新しいシーンは開いたまま");
+            });
+
+            // ── 再読み込みのあと：開いたシーンと表示を戻す ──
+            Do("再読み込みのあとの片付け", () =>
+            {
+                CloseAll();
+                NewFake();
+                EditorSceneManager.OpenScene(PathA, OpenSceneMode.Additive);
+                EditorSceneManager.OpenScene(PathB, OpenSceneMode.Additive);
+                Root(PathB, "AvatarSceneB").SetActive(true);
+                var avA = Root(PathA, "AvatarSceneA");
+                avA.SetActive(true);
+                var s = AvatarUploader.Session;
+                s.jobs.Clear();
+                var job = new UploadJob { id = "ra", name = "AvatarSceneA", scenePath = PathA, objectPath = "AvatarSceneA", blueprintId = "avtr_sa", status = "building" };
+                job.shown.Add("AvatarSceneA");
+                s.jobs.Add(job);
+                s.running = true;
+                s.openedScene = PathB;
+                s.openedSceneListed = false;
+                AvatarUploader.Save();
+                AvatarUploader.ResetCache();
+                typeof(AvatarUploader).GetMethod("RecoverAfterReload", BindingFlags.NonPublic | BindingFlags.Static).Invoke(null, null);
+                Check(!avA.activeSelf, "アップロードの間だけ表示にしていたものを非表示に戻す");
+                Check(!SceneManager.GetSceneByPath(PathB).IsValid(), "アップロードのために開いたシーンを閉じる");
+                Check(SceneManager.GetSceneByPath(PathA).isLoaded, "ほかのシーンは閉じない");
+                CloseAll();
+            });
+
+            // ── 取り消しが別の例外で来る ──
+            Do("取り消しが別の例外：準備", () =>
+            {
+                fake = new Fake { cancelAsError = true };
+                AvatarUploader.Backend = fake;
+                MakeScene();
+                for (int i = 0; i < avatars.Count; i++) fake.ids[avatars[i]] = "avtr_" + (i + 1);
+                fake.slow.Add("avtr_1");
+                var s = AvatarUploader.Session;
+                s.jobs.Clear();
+                AvatarUploader.Add(new[] { root }, new List<string>());
+                AvatarUploader.Start();
+            });
+            Wait("取り消しが別の例外：1 体目を待つ", () => fake.events.Contains("upload:avtr_1"));
+            Do("取り消しが別の例外：中止", AvatarUploader.Abort);
+            WaitRun("取り消しが別の例外");
+            Do("取り消しが別の例外：確認", () =>
+            {
+                var j = AvatarUploader.Session.jobs[0];
+                Check(j.status == "cancelled", "SDK が別の例外で知らせても「中止」にする：" + j.status + " " + j.message);
+            });
+
+            // ── やり直しと Undo ──
+            Do("やり直しと Undo", () =>
+            {
+                var page = new VInc.AvatarHub.UI.UploaderPage();
+                var type = typeof(VInc.AvatarHub.UI.UploaderPage);
+                var oldPage = UndoHub.CurrentPage;
+                UndoHub.CurrentPage = page;
+                var s = AvatarUploader.Session;
+                s.running = false;
+                s.jobs.Clear();
+                s.jobs.Add(new UploadJob { id = "u1", name = "A1", blueprintId = "avtr_u1", status = "failed", message = "エラー", runs = 1 });
+                s.jobs.Add(new UploadJob { id = "u2", name = "A2", blueprintId = "avtr_u2", status = "skipped", message = "同意しなかった", runs = 1 });
+                s.jobs.Add(new UploadJob { id = "u3", name = "A3", blueprintId = "avtr_u3", status = "done", runs = 1 });
+                page.Committed = page.CaptureState();
+                type.GetMethod("RetryFailed", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(page, null);
+                Check(s.Find("u1").status == "waiting" && s.Find("u2").status == "waiting", "失敗したものと、同意しなかったものを待機中に戻す");
+                Check(s.Find("u3").status == "done", "完了したものはそのまま");
+                Undo.PerformUndo();
+                s = AvatarUploader.Session;
+                Check(s.Find("u1").status == "failed" && s.Find("u2").status == "skipped" && s.Find("u1").message == "エラー", "「失敗したものをもう一度」を Ctrl+Z で戻せる：" + string.Join(",", s.jobs.Select(j => j.status)));
+                Undo.PerformRedo();
+                Check(AvatarUploader.Session.Find("u1").status == "waiting", "Ctrl+Y でやり直せる");
+
+                // 実行したあとに消して Undo：実行前の「待機中」には戻らない
+                s = AvatarUploader.Session;
+                s.jobs.Clear();
+                s.jobs.Add(new UploadJob { id = "v1", name = "B1", blueprintId = "avtr_v1" });
+                page.Committed = page.CaptureState();
+                s.jobs[0].status = "done";
+                s.jobs[0].runs = 1;
+                var edit = type.GetMethod("Edit", BindingFlags.NonPublic | BindingFlags.Instance);
+                edit.Invoke(page, new object[] { "消す", (Action)(() => AvatarUploader.Session.jobs.Clear()) });
+                Undo.PerformUndo();
+                Check(AvatarUploader.Session.jobs.Count == 1 && AvatarUploader.Session.jobs[0].status == "done", "完了した行を消して戻しても「完了」のまま（二重にアップロードしない）");
+
+                // 並べ替えたあとに実行して Undo：結果は残る
+                s = AvatarUploader.Session;
+                s.jobs.Clear();
+                s.jobs.Add(new UploadJob { id = "w1", name = "C1", blueprintId = "avtr_w1" });
+                s.jobs.Add(new UploadJob { id = "w2", name = "C2", blueprintId = "avtr_w2" });
+                page.Committed = page.CaptureState();
+                edit.Invoke(page, new object[] { "並べ替え", (Action)(() => AvatarUploader.Session.jobs.Reverse()) });
+                foreach (var j in AvatarUploader.Session.jobs)
+                {
+                    j.status = "done";
+                    j.runs++;
+                }
+                Undo.PerformUndo();
+                s = AvatarUploader.Session;
+                Check(s.jobs[0].id == "w1" && s.jobs.All(j => j.status == "done"), "並べ替えを戻しても、実行した結果は残る");
+                UndoHub.CurrentPage = oldPage;
+                s.jobs.Clear();
+                AvatarUploader.Save();
+            });
+
+            // ── 画面の組み立て（ウィンドウは開かない） ──
+            Do("画面の組み立て", () =>
+            {
+                NewFake();
+                var s = AvatarUploader.Session;
+                s.running = false;
+                s.jobs.Clear();
+                Check(Texts(BuildPage()).Any(t => t.Contains("まだありません")), "空のキュー");
+                s.jobs.Add(new UploadJob { id = "p1", name = "P1", blueprintId = "avtr_p1", status = "done" });
+                s.jobs.Add(new UploadJob { id = "p2", name = "P2", blueprintId = "avtr_p2", status = "skipped", message = "著作権の同意をしなかったので飛ばしました" });
+                var card = BuildPage().root.Q("card-upload-result");
+                Check(card != null && Texts(card).Any(t => t == "失敗したものをもう一度"), "同意しなかったものだけでも、結果にやり直しのボタンを出す");
+                s.jobs[1].status = "uploading";
+                s.jobs[1].phase = "アップロード中";
+                s.jobs[1].progress = 0.4f;
+                s.running = true;
+                Check(BuildPage().root.Q("btn-upload-stop") != null, "実行中は「止める」を出す");
+                s.running = false;
+                s.jobs.Clear();
+                AvatarUploader.Backend = null;
+                Check(Texts(BuildPage()).Any(t => t.Contains("3.10.6")), "SDK が無いときは必要な版を出す");
+                AvatarUploader.Backend = fake;
+                int topics = 0;
+                foreach (var t in VInc.AvatarHub.UI.GuideContent.Topics.Where(x => x.group == "uploader"))
+                {
+                    Check(t.intro.Length + t.steps.Count > 0, "ガイド：" + t.title);
+                    topics++;
+                }
+                Check(topics == 3, "アップローダーのガイドは 3 つ");
             });
         }
+
+        static VInc.AvatarHub.UI.UploaderPage BuildPage()
+        {
+            var page = new VInc.AvatarHub.UI.UploaderPage();
+            page.Build();
+            page.OnHide();
+            return page;
+        }
+
+        static List<string> Texts(VInc.AvatarHub.UI.UploaderPage page) => Texts(page.root);
+
+        static List<string> Texts(VisualElement e) =>
+            e.Query<Label>().ToList().Select(l => l.text).Concat(e.Query<Button>().ToList().Select(b => b.text)).Where(t => !string.IsNullOrEmpty(t)).ToList();
     }
 }
