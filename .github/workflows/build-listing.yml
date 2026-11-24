@@ -26,13 +26,12 @@ concurrency:
 
 jobs:
   
-  # Build the VPM Listing Website and deploy to GitHub Pages
+  # Build the VPM Listing Website
   build-listing:
     name: build-listing
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
     steps:
       
       # Checkout Local Repository
@@ -66,13 +65,81 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
       
+      # One name per attempt, so "Re-run all jobs" does not end up with two artifacts of the same name
+      - name: Name Pages Artifact
+        id: artifact
+        run: echo "name=github-pages-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
       # Upload the VPM Listing Website to GitHub Pages artifacts
       - name: Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
         with:
+          name: ${{ steps.artifact.outputs.name }}
           path: ${{ env.listPublishDirectory }}
-      
-      # Deploy the uploaded VPM Listing Website to GitHub Pages
-      - name: Deploy to GitHub Pages
-        id: deployment
+
+  # Deploy the uploaded VPM Listing Website to GitHub Pages
+  # An artifact can stay invisible for a while after its upload (actions/deploy-pages issue 451),
+  # so this is a separate job that tries again with growing waits. "Re-run failed jobs" repeats only this job.
+  deploy:
+    name: deploy
+    needs: build-listing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy5.outputs.page_url || steps.deploy4.outputs.page_url || steps.deploy3.outputs.page_url || steps.deploy2.outputs.page_url || steps.deploy1.outputs.page_url }}
+    steps:
+
+      - name: Deploy to GitHub Pages (attempt 1)
+        id: deploy1
+        continue-on-error: true
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build-listing.outputs.artifact }}
+
+      - name: Wait 20 seconds
+        if: steps.deploy1.outcome == 'failure'
+        run: sleep 20
+
+      - name: Deploy to GitHub Pages (attempt 2)
+        id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build-listing.outputs.artifact }}
+
+      - name: Wait 60 seconds
+        if: steps.deploy2.outcome == 'failure'
+        run: sleep 60
+
+      - name: Deploy to GitHub Pages (attempt 3)
+        id: deploy3
+        if: steps.deploy2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build-listing.outputs.artifact }}
+
+      - name: Wait 120 seconds
+        if: steps.deploy3.outcome == 'failure'
+        run: sleep 120
+
+      - name: Deploy to GitHub Pages (attempt 4)
+        id: deploy4
+        if: steps.deploy3.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build-listing.outputs.artifact }}
+
+      - name: Wait 240 seconds
+        if: steps.deploy4.outcome == 'failure'
+        run: sleep 240
+
+      - name: Deploy to GitHub Pages (attempt 5)
+        id: deploy5
+        if: steps.deploy4.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build-listing.outputs.artifact }}
